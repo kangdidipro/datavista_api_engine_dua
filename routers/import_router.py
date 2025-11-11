@@ -10,68 +10,147 @@ import json
 from datetime import datetime
 # Import Absolut yang sudah dikoreksi:
 # from models.schemas import TransactionData
-from app.database import bulk_insert_transactions, get_db_connection, create_summary_entry, update_summary_total_records, count_transactions_for_summary, insert_mor_if_not_exists
+from app.database import bulk_insert_transactions, get_db_connection, create_summary_entry, update_summary_total_records, count_transactions_for_summary, insert_mor_if_not_exists, get_spbu_details_by_no_spbu, get_all_spbu_details
 
 
 router = APIRouter(prefix="/v1/import", tags=["CSV Bulk Import"])
 
 @router.post("/csv")
 async def import_csv_to_db(
-    csv_file: UploadFile = File(..., description="File CSV untuk diimport"),
-    title: str = Form(..., description="Judul untuk impor CSV"), # Tambahkan parameter title
+    file: UploadFile = File(..., description="File untuk diimport (CSV atau XLSX)"),
+    title: str = Form(..., description="Judul untuk impor"),
+    type_file: str = Form(..., description="Tipe file: 'A' untuk Asersi (CSV), 'P' untuk Pertamina (XLSX)")
 ):
     """
-    API 1: Menerima file CSV, memvalidasi, membersihkan, dan melakukan bulk insert.
+    API 1: Menerima file CSV/XLSX, memvalidasi, membersihkan, dan melakukan bulk insert.
     Menerapkan logic Pandas (pembersihan data, konversi tipe).
     """
     logging.warning("--- [DIAGNOSTIC] /v1/import/csv endpoint hit. Starting processing. ---")
     
-    logging.warning(f"--- [DIAGNOSTIC] Menerima file: {csv_file.filename}, Tipe Konten: {csv_file.content_type} ---")
+    logging.warning(f"--- [DIAGNOSTIC] Menerima file: {file.filename}, Tipe Konten: {file.content_type}, Tipe File: {type_file} ---")
     
-    if csv_file.content_type not in ["text/csv", "application/vnd.ms-excel", "application/octet-stream"]:
-        raise HTTPException(status_code=400, detail="Hanya menerima format file CSV.")
-
     try:
+        df = pd.DataFrame() # Initialize DataFrame
+        contents = await file.read()
+
+        if type_file == 'A':
+            if file.content_type not in ["text/csv", "application/vnd.ms-excel", "application/octet-stream"]:
+                raise HTTPException(status_code=400, detail="Untuk Tipe A, hanya menerima format file CSV.")
+            csv_buffer = io.BytesIO(contents)
+            df = pd.read_csv(
+                csv_buffer, 
+                sep=';', 
+                decimal=',', 
+                header=None, 
+                skiprows=1, 
+                names=[
+                    'transaction_id_asersi', 'tanggal', 'jam', 'mor', 'provinsi', 
+                    'kota_kabupaten', 'no_spbu', 'no_nozzle', 'no_dispenser', 
+                    'produk', 'volume_liter', 'penjualan_rupiah', 'operator', 
+                    'mode_transaksi', 'plat_nomor', 'nik', 'sektor_non_kendaraan', 
+                    'jumlah_roda_kendaraan', 'kuota', 'warna_plat'
+                ]
+            )
+            # Pastikan jumlah kolom sesuai skema (20 kolom)
+            if df.shape[1] < 20:
+                raise HTTPException(status_code=422, detail="Untuk Tipe A, format CSV tidak valid: Jumlah kolom kurang dari 20.")
+
+        elif type_file == 'P':
+            if file.content_type not in ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel"]:
+                raise HTTPException(status_code=400, detail="Untuk Tipe P, hanya menerima format file XLSX.")
+            excel_buffer = io.BytesIO(contents)
+            df = pd.read_excel(excel_buffer)
+            
+            # Define expected columns from Type P XLSX (based on actual datarow-spbu-54xxxx.xlsx)
+            type_p_columns = [
+                'tanggal', 'jam', 'code_spbu', 'nozzle', 'dispenser', 'produk', 
+                'volume_terjual', 'revenue', 'petugas', 'odometer', 'delivery_type', 
+                'plat_nomor', 'jenis_transaksi', 'agency_type', 'agency_name'
+            ]
+            
+            # Check if all expected columns are present
+            if not all(col in df.columns for col in type_p_columns):
+                missing_cols = [col for col in type_p_columns if col not in df.columns]
+                raise HTTPException(status_code=422, detail=f"Untuk Tipe P, file XLSX tidak valid: Kolom berikut tidak ditemukan: {', '.join(missing_cols)}")
+
+            # Rename columns for Type P to match CsvImportLog schema
+            df = df.rename(columns={
+                'tanggal': 'tanggal',
+                'jam': 'jam',
+                'code_spbu': 'no_spbu',
+                'nozzle': 'no_nozzle',
+                'dispenser': 'no_dispenser',
+                'produk': 'produk',
+                'volume_terjual': 'volume_liter',
+                'revenue': 'penjualan_rupiah',
+                'petugas': 'operator',
+                'plat_nomor': 'plat_nomor',
+                'jenis_transaksi': 'mode_transaksi',
+                # 'agency_type' and 'agency_name' are not directly mapped to CsvImportLog
+                # They might be used for other purposes or can be ignored for now.
+            })
+
+            # Explicitly convert 'tanggal' and 'jam' to datetime objects
+            df['tanggal'] = pd.to_datetime(df['tanggal'])
+            df['jam'] = pd.to_datetime(df['jam']).dt.time # Extract only the time part
+
+            # Derive transaction_id_asersi
+            df['transaction_id_asersi'] = df['no_spbu'].astype(str) + '_' + \
+                                          df['no_nozzle'].astype(str) + '_' + \
+                                          df['tanggal'].dt.strftime('%Y%m%d') + '_' + \
+                                          df['jam'].astype(str).str.replace(':', '')
+
+            # Optimize SPBU details lookup
+            unique_spbus = df['no_spbu'].astype(str).unique().tolist()
+            spbu_details_map = get_all_spbu_details(unique_spbus)
+
+            df['mor'] = df['no_spbu'].astype(str).map(lambda x: spbu_details_map.get(x, (None, None, None))[0])
+            df['provinsi'] = df['no_spbu'].astype(str).map(lambda x: spbu_details_map.get(x, (None, None, None))[1])
+            df['kota_kabupaten'] = df['no_spbu'].astype(str).map(lambda x: spbu_details_map.get(x, (None, None, None))[2])
+
+            # Set NULL for columns not present in Type P
+            df['no_dispenser'] = None
+            df['plat_nomor'] = None
+            df['nik'] = None
+            df['sektor_non_kendaraan'] = None
+            df['jumlah_roda_kendaraan'] = None
+            df['kuota'] = None
+            df['warna_plat'] = None
+
+            # Set default values for other columns
+            df['import_attempt_count'] = 1
+            df['batch_original_duplicate_count'] = 0
+
+            # Ensure all 20 columns + batch_original_duplicate_count are present and in order
+            # This list should match the final cols_for_insert
+            expected_final_columns = [
+                'transaction_id_asersi', 'tanggal', 'jam', 'mor', 'provinsi', 
+                'kota_kabupaten', 'no_spbu', 'no_nozzle', 'no_dispenser', 
+                'produk', 'volume_liter', 'penjualan_rupiah', 'operator', 
+                'mode_transaksi', 'plat_nomor', 'nik', 'sektor_non_kendaraan', 
+                'jumlah_roda_kendaraan', 'kuota', 'warna_plat',
+                'batch_original_duplicate_count'
+            ]
+            df = df[expected_final_columns] # Reorder and select columns
+
+        else:
+            raise HTTPException(status_code=400, detail="Tipe file tidak valid. Harus 'A' atau 'P'.")
+
         start_time = time.perf_counter()
-        file_name = csv_file.filename
+        file_name = file.filename
         
-
-
-        # Membaca konten file ke memori (bytes)
-        contents = await csv_file.read()
-        
-        # Menggunakan io.BytesIO untuk membaca ke Pandas DataFrame
-        csv_buffer = io.BytesIO(contents)
-        
-        # --- 2. BACA CSV BERDASARKAN POSISI KOLOM ---
-        # Mendefinisikan nama kolom sesuai urutan yang diharapkan di database
-        column_names = [
-            'transaction_id_asersi', 'tanggal', 'jam', 'mor', 'provinsi', 
-            'kota_kabupaten', 'no_spbu', 'no_nozzle', 'no_dispenser', 
-            'produk', 'volume_liter', 'penjualan_rupiah', 'operator', 
-            'mode_transaksi', 'plat_nomor', 'nik', 'sektor_non_kendaraan', 
-            'jumlah_roda_kendaraan', 'kuota', 'warna_plat'
-        ]
-
-        # Membaca CSV, melewati header, dan menerapkan nama kolom secara manual
-        df = pd.read_csv(
-            csv_buffer, 
-            sep=';', 
-            decimal=',', 
-            header=None, 
-            skiprows=1, 
-            names=column_names
-        )
-
         # --- 3. LOGIC PANDAS: Pembersihan Data dan Konversi Tipe ---
         
-        # Konversi format tanggal dari DD/MM/YYYY ke YYYY-MM-DD
-        df['tanggal'] = pd.to_datetime(df['tanggal'], format='%d/%m/%Y').dt.strftime('%Y-%m-%d')
-
-        # Pastikan jumlah kolom sesuai skema (20 kolom)
-        if df.shape[1] < 20:
-            raise HTTPException(status_code=422, detail="Format CSV tidak valid: Jumlah kolom kurang dari 20.")
-
+        # Konversi format tanggal dari DD/MM/YYYY ke YYYY-MM-DD (for Type A)
+        # For Type P, pandas read_excel might already parse dates, or we need to handle it.
+        # Assuming for Type P, 'tanggal' is already datetime object from pd.read_excel
+        if type_file == 'A':
+            df['tanggal'] = pd.to_datetime(df['tanggal'], format='%d/%m/%Y').dt.strftime('%Y-%m-%d')
+        elif type_file == 'P':
+            # Ensure 'tanggal' is in YYYY-MM-DD string format for consistency
+            df['tanggal'] = pd.to_datetime(df['tanggal']).dt.strftime('%Y-%m-%d')
+            # Ensure 'jam' is in HH:MM:SS string format
+            df['jam'] = pd.to_datetime(df['jam'], format='%H:%M:%S').dt.strftime('%H:%M:%S')
 
         # Mengonversi kolom ke tipe numerik, mengubah error menjadi NaN (Not a Number)
         df['volume_liter'] = pd.to_numeric(df['volume_liter'], errors='coerce')
@@ -180,6 +259,7 @@ async def import_csv_to_db(
             title=title, # Gunakan title dari parameter
             total_records_inserted=0, # Akan diupdate setelah bulk insert
             total_records_read=df.shape[0], # Total records read from CSV
+            file_type=type_file, # Pass the file type
             total_volume=float(total_volume),
             total_penjualan=str(total_penjualan),
             total_operator=float(total_operator),
@@ -228,7 +308,6 @@ async def import_csv_to_db(
                 "summary_id": summary_id
             }
         )
-
     except Exception as e:
         # Log traceback lengkap untuk debugging di sisi server
         logging.error(f"Gagal memproses file: {e}", exc_info=True)

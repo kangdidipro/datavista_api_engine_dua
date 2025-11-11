@@ -88,6 +88,7 @@ def bulk_insert_transactions(data_tuples: List[Tuple], summary_id: int):
     
     # Menambahkan summary_id (FK) ke setiap baris
     data_with_fk = [item + (summary_id,) for item in data_tuples]
+    logging.warning(f"[DIAGNOSTIC] bulk_insert_transactions using summary_id: {summary_id}")
     
     # Query SQL: INSERT ... ON CONFLICT (transaction_id_asersi) DO UPDATE
     insert_query = sql.SQL("""
@@ -123,7 +124,8 @@ def create_summary_entry(
     file_name,
     title,
     total_records_inserted,
-    total_records_read, # New parameter
+    total_records_read,
+    file_type: str, # New parameter
     total_volume,
     total_penjualan,
     total_operator,
@@ -151,7 +153,7 @@ def create_summary_entry(
     """Membuat entry baru di tabel summary dan mengembalikan summary_id."""
     insert_query = sql.SQL("""
         INSERT INTO {} (
-            import_datetime, import_duration, file_name, title, total_records_inserted, total_records_read,
+            import_datetime, import_duration, file_name, title, total_records_inserted, total_records_read, file_type,
             total_volume, total_penjualan, total_operator, produk_jbt, produk_jbkt,
             total_volume_liter, total_penjualan_rupiah, total_mode_transaksi,
             total_plat_nomor, total_nik, total_sektor_non_kendaraan,
@@ -160,7 +162,7 @@ def create_summary_entry(
             total_warna_plat_putih, total_mor, total_provinsi, total_kota_kabupaten,
             total_no_spbu, numeric_totals
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING summary_id
     """).format(sql.Identifier(SUMMARY_TABLE))
     
@@ -168,7 +170,7 @@ def create_summary_entry(
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(insert_query, (
-                    import_datetime, import_duration, file_name, title, total_records_inserted, total_records_read,
+                    import_datetime, import_duration, file_name, title, total_records_inserted, total_records_read, file_type,
                     total_volume, total_penjualan, total_operator, produk_jbt, produk_jbkt,
                     total_volume_liter, total_penjualan_rupiah, total_mode_transaksi,
                     total_plat_nomor, total_nik, total_sektor_non_kendaraan,
@@ -221,10 +223,12 @@ def count_transactions_for_summary(summary_id: int) -> int:
     count_query = sql.SQL("""
         SELECT COUNT(*) FROM {} WHERE daily_summary_id = %s
     """).format(sql.Identifier(TRANSACTION_TABLE))
+    logging.warning(f"--- [DIAGNOSTIC] count_transactions_for_summary querying for summary_id: {summary_id} ---")
 
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
+                conn.rollback() # Clear any pending transaction state
                 cursor.execute(count_query, (summary_id,))
                 count = cursor.fetchone()[0]
                 logging.warning(f"--- [DIAGNOSTIC] count_transactions_for_summary for summary_id {summary_id} returned: {count} ---")
@@ -257,86 +261,172 @@ def insert_mor_if_not_exists(mor_id: int, mor: str):
         logging.error(f"Failed to insert MOR {mor_id} - {mor}: {e}", exc_info=True)
         raise e
 
+def get_spbu_details_by_no_spbu(no_spbu: str) -> Tuple[int | None, str | None, str | None]:
+    """
+    Mengambil detail MOR, provinsi, dan kota/kabupaten dari tabel master SPBU
+    berdasarkan nomor SPBU.
+    Mengembalikan tuple (mor, provinsi, kota_kabupaten) atau (None, None, None) jika tidak ditemukan.
+    """
+    logging.warning(f"[DIAGNOSTIC] Looking up SPBU details for no_spbu: {no_spbu}")
+    query = sql.SQL("SELECT mor, provinsi, kota_kabupaten FROM tabel_spbu_master WHERE no_spbu = %s")
+    
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (no_spbu,))
+                result = cursor.fetchone()
+                if result:
+                    logging.warning(f"[DIAGNOSTIC] Found SPBU details: {result}")
+                    return result
+                else:
+                    logging.warning(f"[DIAGNOSTIC] SPBU details not found for no_spbu: {no_spbu}")
+                    return None, None, None
+    except Exception as e:
+        logging.error(f"Failed to get SPBU details for no_spbu {no_spbu}: {e}", exc_info=True)
+        return None, None, None
+
+def get_all_spbu_details(no_spbu_list: List[str]) -> dict:
+    """
+    Mengambil detail MOR, provinsi, dan kota/kabupaten untuk daftar no_spbu.
+    Mengembalikan dictionary {no_spbu: (mor, provinsi, kota_kabupaten)}.
+    """
+    if not no_spbu_list:
+        return {}
+
+    logging.warning(f"[DIAGNOSTIC] Looking up details for {len(no_spbu_list)} unique SPBUs.")
+    query = sql.SQL("SELECT no_spbu, mor, provinsi, kota_kabupaten FROM tabel_spbu_master WHERE no_spbu = ANY(%s)")
+    
+    spbu_details_map = {}
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query, (list(set(no_spbu_list)),)) # Use set to ensure unique SPBUs
+                results = cursor.fetchall()
+                for row in results:
+                    spbu_details_map[row[0]] = (row[1], row[2], row[3])
+        logging.warning(f"[DIAGNOSTIC] Found details for {len(spbu_details_map)} SPBUs.")
+        return spbu_details_map
+    except Exception as e:
+        logging.error(f"Failed to get all SPBU details: {e}", exc_info=True)
+        return {}
+
 # --- 3. LOGIC PEMBUATAN TABEL AWAL (Untuk digunakan di Docker Entrypoint) ---
 def create_initial_tables(conn):
-    """Membuat tabel log transaksi dan summary jika belum ada."""
-
-    # Jalankan kueri
+    """Membuat tabel log transaksi, summary, dan tabel_spbu_master jika belum ada."""
+    logging.warning("--- [DIAGNOSTIC] create_initial_tables function called. ---")
     try:    
-    
-        # NOTE: Pastikan semua kolom dari cols_for_insert didefinisikan di sini
         cursor = conn.cursor()
 
-        # CREATE_TRANSACTION_LOG = sql.SQL("""
-        #     CREATE TABLE {} (
-        #         transaction_id_asersi VARCHAR(50) NOT NULL PRIMARY KEY,
-        #         tanggal DATE NOT NULL,
-        #         jam TIME WITHOUT TIME ZONE NOT NULL,
-        #         mor INTEGER,
-        #         provinsi VARCHAR(50),
-        #         kota_kabupaten VARCHAR(50),
-        #         no_spbu VARCHAR(20),
-        #         no_nozzle VARCHAR(20),
-        #         no_dispenser VARCHAR(50),
-        #         produk VARCHAR(50),
-        #         volume_liter NUMERIC(10,3),
-        #         penjualan_rupiah VARCHAR(50),
-        #         operator VARCHAR(50),
-        #         mode_transaksi VARCHAR(50),
-        #         plat_nomor VARCHAR(20),
-        #         nik VARCHAR(30),
-        #         sektor_non_kendaraan VARCHAR(50),
-        #         jumlah_roda_kendaraan VARCHAR(50),
-        #         kuota NUMERIC(10,1),
-        #         warna_plat VARCHAR(20),
-        #         daily_summary_id INTEGER,
-        #         import_attempt_count INTEGER DEFAULT 0,
-        #         batch_original_duplicate_count INTEGER DEFAULT 0,
-        #         CONSTRAINT fk_daily_summary FOREIGN KEY (daily_summary_id)
-        #             REFERENCES {} (summary_id) ON DELETE CASCADE
-        #     );
-        # """).format(sql.Identifier(TRANSACTION_TABLE), sql.Identifier(SUMMARY_TABLE))
+        # Explicitly drop tables to ensure a clean slate during development
+        logging.warning("--- [DIAGNOSTIC] Attempting to drop existing tables... ---")
+        DROP_TABLES = sql.SQL("""
+            DROP TABLE IF EXISTS {}, {}, tabel_spbu_master, tabel_mor CASCADE;
+        """).format(sql.Identifier(TRANSACTION_TABLE), sql.Identifier(SUMMARY_TABLE))
+        cursor.execute(DROP_TABLES)
+        conn.commit()
+        logging.warning("--- [DIAGNOSTIC] Existing tables dropped (if they existed). ---")
 
-        # CREATE_SUMMARY_MASTER = sql.SQL("""
-        #     CREATE TABLE {} (
-        #         summary_id SERIAL PRIMARY KEY,
-        #         import_datetime TIMESTAMP WITHOUT TIME ZONE NOT NULL,
-        #         import_duration NUMERIC(20,3),
-        #         file_name VARCHAR(50),
-        #         title VARCHAR(50),
-        #         total_records_inserted INTEGER,
-        #         total_records_read INTEGER,
-        #         total_volume NUMERIC(20,3),
-        #         total_penjualan VARCHAR(50),
-        #         total_operator NUMERIC(20,3),
-        #         produk_jbt VARCHAR(50),
-        #         produk_jbkt VARCHAR(50),
-        #         total_volume_liter NUMERIC(10,3),
-        #         total_penjualan_rupiah VARCHAR(50),
-        #         total_mode_transaksi VARCHAR(50),
-        #         total_plat_nomor VARCHAR(20),
-        #         total_nik VARCHAR(30),
-        #         total_sektor_non_kendaraan VARCHAR(50),
-        #         total_jumlah_roda_kendaraan_4 VARCHAR(50),
-        #         total_jumlah_roda_kendaraan_6 VARCHAR(50),
-        #         total_kuota NUMERIC(10,1),
-        #         total_warna_plat_kuning VARCHAR(20),
-        #         total_warna_plat_hitam VARCHAR(20),
-        #         total_warna_plat_merah VARCHAR(20),
-        #         total_warna_plat_putih VARCHAR(20),
-        #         total_mor NUMERIC(20,3),
-        #         total_provinsi NUMERIC(20,3),
-        #         total_kota_kabupaten NUMERIC(20,3),
-        #         total_no_spbu NUMERIC(20,3),
-        #         numeric_totals JSONB
-        #     );
-        # """).format(sql.Identifier(SUMMARY_TABLE))
+        logging.warning("--- [DIAGNOSTIC] Attempting to create tabel_spbu_master if not exists. ---")
+        # CREATE tabel_spbu_master
+        CREATE_SPBU_MASTER = sql.SQL("""
+            CREATE TABLE IF NOT EXISTS tabel_spbu_master (
+                no_spbu VARCHAR(20) PRIMARY KEY,
+                mor INTEGER,
+                provinsi VARCHAR(50),
+                kota_kabupaten VARCHAR(50),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        """)
+        cursor.execute(CREATE_SPBU_MASTER)
+        conn.commit()
+        logging.warning("--- [DIAGNOSTIC] tabel_spbu_master created or already exists. ---")
 
-        # # Jalankan kueri
-        # cursor.execute(CREATE_SUMMARY_MASTER)
-        # cursor.execute(CREATE_TRANSACTION_LOG)
-        # conn.commit()
-        # logging.warning("SCHEMAS CREATED SUCCESSFULLY") # Tanda keberhasilan
+        # CREATE tabel_mor
+        CREATE_TABEL_MOR = sql.SQL("""
+            CREATE TABLE IF NOT EXISTS tabel_mor (
+                mor_id INTEGER PRIMARY KEY,
+                mor VARCHAR(50) NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+        """)
+        cursor.execute(CREATE_TABEL_MOR)
+        conn.commit()
+        logging.warning("--- [DIAGNOSTIC] tabel_mor created or already exists. ---")
+
+
+        CREATE_TRANSACTION_LOG = sql.SQL("""
+            CREATE TABLE IF NOT EXISTS {} (
+                transaction_id_asersi VARCHAR(50) NOT NULL PRIMARY KEY,
+                tanggal DATE NOT NULL,
+                jam TIME WITHOUT TIME ZONE NOT NULL,
+                mor INTEGER,
+                provinsi VARCHAR(50),
+                kota_kabupaten VARCHAR(50),
+                no_spbu VARCHAR(20),
+                no_nozzle VARCHAR(20),
+                no_dispenser VARCHAR(50),
+                produk VARCHAR(50),
+                volume_liter NUMERIC(10,3),
+                penjualan_rupiah VARCHAR(50),
+                operator VARCHAR(50),
+                mode_transaksi VARCHAR(50),
+                plat_nomor VARCHAR(20),
+                nik VARCHAR(30),
+                sektor_non_kendaraan VARCHAR(50),
+                jumlah_roda_kendaraan VARCHAR(50),
+                kuota NUMERIC(10,1),
+                warna_plat VARCHAR(20),
+                daily_summary_id INTEGER,
+                import_attempt_count INTEGER DEFAULT 0,
+                batch_original_duplicate_count INTEGER DEFAULT 0,
+                CONSTRAINT fk_daily_summary FOREIGN KEY (daily_summary_id)
+                    REFERENCES {} (summary_id) ON DELETE CASCADE
+            );
+        """).format(sql.Identifier(TRANSACTION_TABLE), sql.Identifier(SUMMARY_TABLE))
+
+        CREATE_SUMMARY_MASTER = sql.SQL("""
+            CREATE TABLE IF NOT EXISTS {} (
+                summary_id SERIAL PRIMARY KEY,
+                import_datetime TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                import_duration NUMERIC(20,3),
+                file_name VARCHAR(50),
+                title VARCHAR(50),
+                file_type VARCHAR(1), -- New column
+                total_records_inserted INTEGER,
+                total_records_read INTEGER,
+                total_volume NUMERIC(20,3),
+                total_penjualan VARCHAR(50),
+                total_operator NUMERIC(20,3),
+                produk_jbt VARCHAR(50),
+                produk_jbkt VARCHAR(50),
+                total_volume_liter NUMERIC(10,3),
+                total_penjualan_rupiah VARCHAR(50),
+                total_mode_transaksi VARCHAR(50),
+                total_plat_nomor VARCHAR(20),
+                total_nik VARCHAR(30),
+                total_sektor_non_kendaraan VARCHAR(50),
+                total_jumlah_roda_kendaraan_4 VARCHAR(50),
+                total_jumlah_roda_kendaraan_6 VARCHAR(50),
+                total_kuota NUMERIC(10,1),
+                total_warna_plat_kuning VARCHAR(20),
+                total_warna_plat_hitam VARCHAR(20),
+                total_warna_plat_merah VARCHAR(20),
+                total_warna_plat_putih VARCHAR(20),
+                total_mor NUMERIC(20,3),
+                total_provinsi NUMERIC(20,3),
+                total_kota_kabupaten NUMERIC(20,3),
+                total_no_spbu NUMERIC(20,3),
+                numeric_totals JSONB
+            );
+        """).format(sql.Identifier(SUMMARY_TABLE))
+
+        # Jalankan kueri
+        cursor.execute(CREATE_SUMMARY_MASTER)
+        cursor.execute(CREATE_TRANSACTION_LOG)
+        conn.commit()
+        logging.warning("SCHEMAS CREATED SUCCESSFULLY") # Tanda keberhasilan
 
     except psycopg2.Error as e:
         # DEBUG KRITIS: Tampilkan error SQL sebenarnya

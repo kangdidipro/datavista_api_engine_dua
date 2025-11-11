@@ -14,10 +14,12 @@ import redis
 # Import Router (Absolut - Sudah LULUS troubleshooting path)
 from routers.import_router import router as import_router
 from routers.video_router import router as video_router
-from routers.anomaly_router import router as anomaly_router
+# from routers.anomaly_router import router as anomaly_router # Dikomentari sementara
 from routers.export_router import router as export_router
 from routers.summary_router import router as summary_router
 
+# Import database functions
+from app.database import get_db_connection, create_initial_tables
 
 # --- 1. INISIALISASI APLIKASI (DEKLARASI 'app' - CRITICAL FIX) ---
 app = FastAPI(
@@ -25,6 +27,11 @@ app = FastAPI(
     description="API Gateway for CSV Import and Video Job Queue Management.",
     version="1.0.0"
 )
+
+@app.on_event("startup")
+async def startup_event():
+    with get_db_connection() as conn:
+        create_initial_tables(conn)
 
 # --- 2. KONFIGURASI CORS ---
 origins = [
@@ -90,7 +97,7 @@ async def check_database_status():
 # --- 4. INTEGRASI ROUTERS UTAMA ---
 
 app.include_router(import_router)
-app.include_router(anomaly_router)
 app.include_router(video_router)
+# app.include_router(anomaly_router) # Dikomentari sementara
 app.include_router(export_router)
 app.include_router(summary_router)

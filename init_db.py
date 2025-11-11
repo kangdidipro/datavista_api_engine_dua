@@ -8,10 +8,10 @@ import subprocess
 
 # Impor model/session (tetap diperlukan agar Alembic dapat mendeteksi model)
 try:
-    import models.models
-    from models.base import SessionLocal, engine
+    from app import models # Corrected import path
+    from app.database import SessionLocal, engine # Corrected import path
     from sqlalchemy import text
-    import seed # Import the seed module (Asumsi ini berisi fungsi run_seed atau seed_initial_data)
+    # import seed # Import the seed module (Asumsi ini berisi fungsi run_seed atau seed_initial_data)
 except ImportError as e:
     logging.error(f"Error importing modules: {e}. Check your PYTHONPATH and dependencies.")
     sys.exit(1)
@@ -33,9 +33,9 @@ POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'DatavistaAPI@2025')
 POSTGRES_ADMIN_USER = os.getenv('POSTGRES_ADMIN_USER', 'postgres') # Asumsi Superuser
 POSTGRES_ADMIN_PASSWORD = os.getenv('POSTGRES_ADMIN_PASSWORD') # HARUS diset
 
-if not POSTGRES_ADMIN_PASSWORD:
-    logging.error("POSTGRES_ADMIN_PASSWORD must be set for database creation/destruction.")
-    sys.exit(1)
+# if not POSTGRES_ADMIN_PASSWORD:
+#     logging.error("POSTGRES_ADMIN_PASSWORD must be set for database creation/destruction.")
+#     sys.exit(1)
 
 
 # --- Fungsi Koneksi Cek (Menggunakan Kredensial Biasa) ---
@@ -168,8 +168,8 @@ if __name__ == "__main__":
     # PENTING: Tunggu sebentar setelah migrasi, sebelum mencoba koneksi aplikasi biasa
     time.sleep(10) 
 
-    if not seed_initial_data(): # Mengganti nama run_seed() ke seed_initial_data() untuk konsistensi
-        sys.exit(1)
+    # if not seed_initial_data(): # Mengganti nama run_seed() ke seed_initial_data() untuk konsistensi
+    #     sys.exit(1)
 
 
     logging.info("✅ Database Initialization Completed Successfully.")
