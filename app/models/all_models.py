@@ -1,8 +1,7 @@
-from sqlalchemy import (
-    Column, Integer, String, Boolean, DateTime, ForeignKey, Numeric, ARRAY, JSON, Time, BigInteger, TypeDecorator
-)
+from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, JSON, Float, ForeignKey, Numeric, PrimaryKeyConstraint, BigInteger # Import Numeric, PrimaryKeyConstraint, BigInteger
 from sqlalchemy.orm import relationship
-from .base import Base # Import Base from models.base
+from sqlalchemy.types import TypeDecorator # Import TypeDecorator
+from ..db_base import Base # Import Base from app.db_base
 from datetime import datetime
 import json
 
@@ -21,6 +20,44 @@ class SQLiteARRAY(TypeDecorator):
             return json.loads(value)
         return value
 
+# --- CsvSummaryMasterDaily (moved from where it was a duplicate definition) ---
+class CsvSummaryMasterDaily(Base):
+    __tablename__ = 'csv_summary_master_daily'
+    summary_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    import_datetime = Column(DateTime, nullable=False)
+    import_duration = Column(Numeric(20, 3))
+    file_name = Column(String)
+    title = Column(String)
+    file_type = Column(String)
+    total_records_inserted = Column(Integer)
+    total_records_read = Column(Integer)
+    total_volume = Column(Numeric(20, 3))
+    total_penjualan = Column(String)
+    total_operator = Column(Numeric(20, 3))
+    produk_jbt = Column(String)
+    produk_jbkt = Column(String)
+    total_volume_liter = Column(Numeric(10, 3))
+    total_penjualan_rupiah = Column(String)
+    total_mode_transaksi = Column(String)
+    total_plat_nomor = Column(String)
+    total_nik = Column(String)
+    sektor_non_kendaraan = Column(String)
+    total_jumlah_roda_kendaraan_4 = Column(String)
+    total_jumlah_roda_kendaraan_6 = Column(String)
+    total_kuota = Column(Numeric(10, 1))
+    total_warna_plat_kuning = Column(String)
+    total_warna_plat_hitam = Column(String)
+    total_warna_plat_merah = Column(String)
+    total_warna_plat_putih = Column(String)
+    total_mor = Column(Numeric(20, 3))
+    total_provinsi = Column(Numeric(20, 3))
+    total_kota_kabupaten = Column(Numeric(20, 3))
+    total_no_spbu = Column(Numeric(20, 3))
+    numeric_totals = Column(JSON)
+
+    logs = relationship("CsvImportLog", back_populates="summary")
+
+# --- Anomaly Models and Linker Tables ---
 class AnomalyTemplateMaster(Base):
     __tablename__ = 'anomaly_template_master'
     template_id = Column(Integer, primary_key=True, index=True)
@@ -31,11 +68,13 @@ class AnomalyTemplateMaster(Base):
     last_modified = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_by = Column(String)
 
-    # Relationships
+    # Relationships (without back_populates/backref for now)
     transaction_criteria = relationship("TransactionAnomalyCriteria", secondary="template_criteria_volume", back_populates="templates")
     special_criteria = relationship("SpecialAnomalyCriteria", secondary="template_criteria_special", back_populates="templates")
     video_parameters = relationship("VideoAiParameter", secondary="template_criteria_video", back_populates="templates")
     accumulated_criteria = relationship("AccumulatedAnomalyCriteria", secondary="template_criteria_accumulated", back_populates="templates")
+    results = relationship("AnomalyResult", back_populates="template")
+    executions = relationship("AnomalyExecution", back_populates="template")
 
 class TransactionAnomalyCriteria(Base):
     __tablename__ = 'transaction_anomaly_criteria'
@@ -94,11 +133,11 @@ class TemplateCriteriaVideo(Base):
 class AccumulatedAnomalyCriteria(Base):
     __tablename__ = 'accumulated_anomaly_criteria'
     accumulated_criteria_id = Column(Integer, primary_key=True, index=True)
-    criteria_code = Column(String, unique=True, nullable=False) # e.g., 'MAX_DAILY_VOLUME'
+    criteria_code = Column(String, unique=True, nullable=False)
     criteria_name = Column(String, nullable=False)
-    threshold_value = Column(Numeric(20, 3), nullable=False) # e.g., max volume
-    time_window_hours = Column(Integer, default=24) # e.g., for daily accumulation
-    group_by_field = Column(String, nullable=False) # e.g., 'plat_nomor', 'nik'
+    threshold_value = Column(Numeric(20, 3), nullable=False)
+    time_window_hours = Column(Integer, default=24)
+    group_by_field = Column(String, nullable=False)
     description = Column(String)
     is_active = Column(Boolean, default=True)
     templates = relationship("AnomalyTemplateMaster", secondary="template_criteria_accumulated", back_populates="accumulated_criteria")
@@ -111,97 +150,24 @@ class TemplateCriteriaAccumulated(Base):
 
 class AnomalyResult(Base):
     __tablename__ = 'anomaly_results'
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    __table_args__ = (
+        PrimaryKeyConstraint('execution_id', 'transaction_id_asersi'),
+    )
     execution_id = Column(String(50), ForeignKey('anomaly_executions.execution_id', ondelete="CASCADE"), nullable=False)
-    transaction_id_asersi = Column(String)
-    summary_id = Column(Integer, ForeignKey('csv_summary_master_daily.summary_id', ondelete="CASCADE"))
+    transaction_id_asersi = Column(String(50), nullable=False)
+    summary_id = Column(Integer, nullable=False)
     template_id = Column(Integer, ForeignKey('anomaly_template_master.template_id'))
-    criteria_id_violated = Column(Integer, ForeignKey('transaction_anomaly_criteria.criteria_id'))
-    special_criteria_id_violated = Column(Integer, ForeignKey('special_anomaly_criteria.special_criteria_id'))
-    accumulated_criteria_id_violated = Column(Integer, ForeignKey('accumulated_anomaly_criteria.accumulated_criteria_id'))
-    anomaly_datetime = Column(DateTime)
-    anomaly_type = Column(String)
-    violation_value = Column(String)
+    
+    is_anomalous = Column(Boolean, default=False)
+    anomaly_flags = Column(SQLiteARRAY, default=[])
+    violation_details = Column(JSON, default={})
+
+    anomaly_datetime = Column(DateTime, default=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    execution = relationship("AnomalyExecution")
-    summary = relationship("CsvSummaryMasterDaily")
-    template = relationship("AnomalyTemplateMaster")
-    transaction_criteria = relationship("TransactionAnomalyCriteria")
-    special_criteria = relationship("SpecialAnomalyCriteria")
-    accumulated_criteria = relationship("AccumulatedAnomalyCriteria")
-
-class CsvSummaryMasterDaily(Base):
-    __tablename__ = 'csv_summary_master_daily'
-    summary_id = Column(Integer, primary_key=True, index=True, autoincrement=True) # Changed to BigInteger
-    import_datetime = Column(DateTime, nullable=False)
-    import_duration = Column(Numeric(20, 3))
-    file_name = Column(String) # Removed length constraint
-    title = Column(String) # Removed length constraint
-    total_records_inserted = Column(Integer)
-    total_records_read = Column(Integer)
-    total_volume = Column(Numeric(20, 3))
-    total_penjualan = Column(String) # Removed length constraint
-    total_operator = Column(Numeric(20, 3))
-    produk_jbt = Column(String) # Removed length constraint
-    produk_jbkt = Column(String) # Removed length constraint
-    total_volume_liter = Column(Numeric(10, 3))
-    total_penjualan_rupiah = Column(String) # Removed length constraint
-    total_mode_transaksi = Column(String) # Removed length constraint
-    total_plat_nomor = Column(String) # Removed length constraint
-    total_nik = Column(String) # Removed length constraint
-    total_sektor_non_kendaraan = Column(String) # Removed length constraint
-    total_jumlah_roda_kendaraan_4 = Column(String) # Removed length constraint
-    total_jumlah_roda_kendaraan_6 = Column(String) # Removed length constraint
-    total_kuota = Column(Numeric(10, 1))
-    total_warna_plat_kuning = Column(String) # Removed length constraint
-    total_warna_plat_hitam = Column(String) # Removed length constraint
-    total_warna_plat_merah = Column(String) # Removed length constraint
-    total_warna_plat_putih = Column(String) # Removed length constraint
-    total_mor = Column(Numeric(20, 3))
-    total_provinsi = Column(Numeric(20, 3))
-    total_kota_kabupaten = Column(Numeric(20, 3))
-    total_no_spbu = Column(Numeric(20, 3))
-    numeric_totals = Column(JSON)
-
-class CsvImportLog(Base):
-    __tablename__ = 'csv_import_log'
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    transaction_id_asersi = Column(String(50), unique=True, nullable=False)
-    tanggal = Column(String, nullable=False)
-    jam = Column(String, nullable=False)
-    mor = Column(String) # Corrected to String
-    provinsi = Column(String) # Removed length constraint
-    kota_kabupaten = Column(String) # Removed length constraint
-    no_spbu = Column(String) # Removed length constraint
-    no_nozzle = Column(String) # Removed length constraint
-    no_dispenser = Column(String) # Removed length constraint
-    produk = Column(String) # Removed length constraint
-    volume_liter = Column(Numeric(10, 3))
-    penjualan_rupiah = Column(Numeric(15, 2))
-    operator = Column(String) # Removed length constraint
-    mode_transaksi = Column(String) # Removed length constraint
-    plat_nomor = Column(String) # Removed length constraint
-    nik = Column(String) # Removed length constraint
-    sektor_non_kendaraan = Column(String) # Removed length constraint
-    jumlah_roda_kendaraan = Column(String) # Removed length constraint
-    kuota = Column(String) # Corrected to String
-    warna_plat = Column(String) # Removed length constraint
-    daily_summary_id = Column(BigInteger, ForeignKey('csv_summary_master_daily.summary_id'))
-    import_attempt_count = Column(Integer, default=1)
-    batch_original_duplicate_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    summary = relationship("CsvSummaryMasterDaily")
-
-class TabelMor(Base):
-    __tablename__ = 'tabel_mor'
-    mor_id = Column(Integer, primary_key=True, index=True)
-    mor = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    execution = relationship("AnomalyExecution", back_populates="results")
+    template = relationship("AnomalyTemplateMaster", back_populates="results")
 
 class AnomalyExecution(Base):
     __tablename__ = 'anomaly_executions'
@@ -214,7 +180,9 @@ class AnomalyExecution(Base):
     rules_config = Column(JSON)
     total_batches_processed = Column(Integer, default=0)
 
-    template = relationship("AnomalyTemplateMaster")
+    results = relationship("AnomalyResult", back_populates="execution")
+
+    template = relationship("AnomalyTemplateMaster", back_populates="executions")
     batches = relationship("AnomalyExecutionBatch", back_populates="execution")
 
 class AnomalyExecutionBatch(Base):
@@ -224,7 +192,6 @@ class AnomalyExecutionBatch(Base):
     summary_id = Column(Integer, ForeignKey('csv_summary_master_daily.summary_id', ondelete="CASCADE"), nullable=False)
     batch_status = Column(String(50))
     anomalies_found = Column(Integer, default=0)
-    # Kolom untuk menyimpan nilai anomali P1-P6
     p1_anomaly_value = Column(String, default="NA")
     p2_anomaly_value = Column(String, default="NA")
     p3_anomaly_value = Column(String, default="NA")
@@ -232,6 +199,42 @@ class AnomalyExecutionBatch(Base):
     p5_anomaly_value = Column(String, default="NA")
     p6_anomaly_value = Column(String, default="NA")
 
-    execution = relationship("AnomalyExecution", back_populates="execution")
-    summary = relationship("CsvSummaryMasterDaily")
+    execution = relationship("AnomalyExecution", back_populates="batches")
 
+class CsvImportLog(Base):
+    __tablename__ = 'csv_import_log'
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    transaction_id_asersi = Column(String(50), unique=True, nullable=False)
+    tanggal = Column(String, nullable=False)
+    jam = Column(String, nullable=False)
+    mor = Column(String)
+    provinsi = Column(String)
+    kota_kabupaten = Column(String)
+    no_spbu = Column(String)
+    no_nozzle = Column(String)
+    no_dispenser = Column(String)
+    produk = Column(String)
+    volume_liter = Column(Numeric(10, 3))
+    penjualan_rupiah = Column(Numeric(15, 2))
+    operator = Column(String)
+    mode_transaksi = Column(String)
+    plat_nomor = Column(String)
+    nik = Column(String)
+    sektor_non_kendaraan = Column(String)
+    jumlah_roda_kendaraan = Column(String)
+    kuota = Column(String)
+    warna_plat = Column(String)
+    daily_summary_id = Column(BigInteger, ForeignKey('csv_summary_master_daily.summary_id'))
+    import_attempt_count = Column(Integer, default=1)
+    batch_original_duplicate_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    summary = relationship("CsvSummaryMasterDaily", back_populates="logs")
+
+class TabelMor(Base):
+    __tablename__ = 'tabel_mor'
+    mor_id = Column(Integer, primary_key=True, index=True)
+    mor = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

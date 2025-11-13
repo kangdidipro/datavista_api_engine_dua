@@ -1,222 +1,231 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
-from app import models
-from datetime import datetime, timedelta
 from rq import get_current_job
-import time
-from typing import List
-from crud import anomaly_execution_crud # Import the new CRUD
+import pandas as pd # Keep pandas for potential future data manipulation, though not used for file reading here
+from app.models import AnomalyTemplateMaster, TransactionAnomalyCriteria, SpecialAnomalyCriteria, AccumulatedAnomalyCriteria, AnomalyResult, AnomalyExecution, AnomalyExecutionBatch, CsvSummaryMasterDaily, CsvImportLog, TabelMor
+from app.schemas import AnomalyAnalysisRequest
+from datetime import datetime
+import logging
+import uuid
+from typing import Optional
 
-def run_anomaly_analysis(execution_id: str, summary_ids: List[int], db: Session):
+logger = logging.getLogger(__name__)
+
+def run_anomaly_analysis(execution_id: str, summary_ids: list, template_id: int, db: Session):
+    logger.info(f"Starting anomaly analysis for execution_id: {execution_id}, summary_ids: {summary_ids}")
     job = get_current_job()
-    start_time = time.time()
 
-    # 1. Get AnomalyExecution record
-    execution = anomaly_execution_crud.get_anomaly_execution_by_id(db, execution_id)
-    if not execution:
-        job.meta['progress'] = 'Error: Anomaly Execution record not found.'
-        job.save_meta()
-        return
+    # Fetch the anomaly template and its associated criteria
+    template = db.query(AnomalyTemplateMaster).filter(
+        AnomalyTemplateMaster.template_id == template_id
+    ).first()
 
-    anomaly_execution_crud.update_anomaly_execution_status(db, execution_id, 'PROCESSING')
+    if not template:
+        logger.error(f"Anomaly template with ID {template_id} not found.")
+        return {"status": "failed", "execution_id": execution_id, "message": f"Template {template_id} not found"}
 
-    total_anomalies_found = 0
-    anomalies_per_criteria = {}
-    total_batches_processed_count = 0
+    transaction_rules = template.transaction_criteria
+    accumulated_rules = template.accumulated_criteria
+    special_rules = template.special_criteria
 
-    for summary_id in summary_ids:
-        # Get the template associated with this execution
-        template = db.query(app_models.AnomalyTemplateMaster).filter(app_models.AnomalyTemplateMaster.template_id == execution.template_id).one_or_none()
-        if not template:
-            # Handle error: template not found for this execution
-            # For now, just skip this summary_id or log an error
-            print(f"Error: Template with ID {execution.template_id} not found for execution {execution_id}")
-            continue
+    logger.info(f"Loaded {len(transaction_rules)} transaction rules, {len(accumulated_rules)} accumulated rules, {len(special_rules)} special rules for template {template_id}.")
 
-        # Update batch status to PROCESSING
-        batch_record = anomaly_execution_crud.create_anomaly_execution_batch(
-            db=db,
-            execution_id=execution_id,
-            summary_id=summary_id,
-            batch_status="PROCESSING"
-        )
+    # Fetch data from CsvImportLog based on summary_ids
+    # For simplicity, we'll fetch all logs associated with the provided summary_ids
+    # In a real scenario, you might filter further based on template criteria
+    
+    # Ensure summary_ids is not empty
+    if not summary_ids:
+        logger.warning("No summary_ids provided for anomaly analysis. Skipping.")
+        return {"status": "skipped", "execution_id": execution_id, "message": "No summary_ids provided"}
 
-        total_rows_to_process = db.query(app_models.CsvImportLog).filter(app_models.CsvImportLog.daily_summary_id == summary_id).count()
-        processed_rows = 0
-        batch_anomalies_found = 0
+    # Fetch relevant CsvImportLog entries
+    # Assuming CsvImportLog has a daily_summary_id column linking to CsvSummaryMasterDaily.summary_id
+    transactions_to_analyze = db.query(CsvImportLog).filter(
+        CsvImportLog.daily_summary_id.in_(summary_ids)
+    ).all()
 
-        # 2. Single Transaction Analysis
-        for criteria in template.transaction_criteria:
-            if criteria.anomaly_type == 'SINGLE_TX':
-                query = db.query(models.CsvImportLog).filter(
-                    models.CsvImportLog.daily_summary_id == summary_id,
-                    models.CsvImportLog.volume_liter > criteria.min_volume_liter,
-                    models.CsvImportLog.consumer_type == criteria.consumer_type
-                ).yield_per(1000)
+    if not transactions_to_analyze:
+        logger.info(f"No transactions found for summary_ids: {summary_ids}. No anomalies to check.")
+        return {"status": "completed", "execution_id": execution_id, "summary_ids": summary_ids, "message": "No transactions to analyze"}
 
-                for anomaly in query:
-                    processed_rows += 1
-                    job.meta['progress'] = f"Menganalisis Batch {summary_id}... ({processed_rows}/{total_rows_to_process})"
-                    job.save_meta()
+    logger.info(f"Found {len(transactions_to_analyze)} transactions to analyze for summary_ids: {summary_ids}")
 
-                    new_result = models.AnomalyResult( # Changed to AnomalyResult
-                        execution_id=execution.execution_id, # Use execution_id
-                        transaction_id_asersi=anomaly.transaction_id_asersi,
-                        summary_id=summary_id,
-                        template_id=template.template_id,
-                        criteria_id_violated=criteria.criteria_id,
-                        anomaly_datetime=datetime.combine(datetime.strptime(anomaly.tanggal, '%Y-%m-%d').date(), datetime.strptime(anomaly.jam, '%H:%M:%S').time()),
-                        anomaly_type=criteria.anomaly_type,
-                        violation_value=str(anomaly.volume_liter)
-                    )
-                    db.add(new_result)
-                    total_anomalies_found += 1
-                    batch_anomalies_found += 1
-                    anomalies_per_criteria[f"vol_{criteria.criteria_id}"] = anomalies_per_criteria.get(f"vol_{criteria.criteria_id}", 0) + 1
-                    if processed_rows % 1000 == 0:
-                        db.commit()
+    # --- Dynamic Anomaly Detection Logic will go here ---
+    # This section will be replaced with dynamic rule application based on the fetched template criteria.
+    # For now, it's a placeholder.
+    anomalies_found_count = 0
+    
+    # Prepare a dictionary for quick lookup of special rules by criteria_code
+    special_rules_dict = {rule.criteria_code: rule for rule in special_rules}
+    
+    # Convert transactions to a DataFrame for easier manipulation, especially for accumulated rules
+    # and interval checks. This also handles datetime conversions once.
+    df_transactions = pd.DataFrame([
+        {
+            "transaction_id_asersi": t.transaction_id_asersi,
+            "daily_summary_id": t.daily_summary_id,
+            "tanggal": t.tanggal,
+            "jam": t.jam,
+            "mor": t.mor,
+            "provinsi": t.provinsi,
+            "kota_kabupaten": t.kota_kabupaten,
+            "no_spbu": t.no_spbu,
+            "no_nozzle": t.no_nozzle,
+            "no_dispenser": t.no_dispenser,
+            "produk": t.produk,
+            "volume_liter": float(t.volume_liter) if t.volume_liter is not None else None,
+            "penjualan_rupiah": float(t.penjualan_rupiah) if t.penjualan_rupiah is not None else None,
+            "operator": t.operator,
+            "mode_transaksi": t.mode_transaksi,
+            "plat_nomor": t.plat_nomor,
+            "nik": t.nik,
+            "sektor_non_kendaraan": t.sektor_non_kendaraan,
+            "jumlah_roda_kendaraan": t.jumlah_roda_kendaraan,
+            "kuota": float(t.kuota) if t.kuota is not None else None,
+            "warna_plat": t.warna_plat,
+            "created_at": t.created_at,
+            "updated_at": t.updated_at
+        } for t in transactions_to_analyze
+    ])
 
-        # 3. Special Criteria Analysis
-        for criteria in template.special_criteria:
-            if criteria.criteria_code == 'NO_ID':
-                query = db.query(models.CsvImportLog).filter(
-                    models.CsvImportLog.daily_summary_id == summary_id,
-                    (models.CsvImportLog.plat_nomor == None) | (models.CsvImportLog.nik == None)
-                ).yield_per(1000)
+    # Convert 'tanggal' and 'jam' to datetime objects for proper sorting and interval calculation
+    df_transactions['transaction_datetime'] = pd.to_datetime(df_transactions['tanggal'] + ' ' + df_transactions['jam'])
+    df_transactions = df_transactions.sort_values(by=['plat_nomor', 'transaction_datetime']).reset_index(drop=True)
 
-                for anomaly in query:
-                    processed_rows += 1
-                    job.meta['progress'] = f"Menganalisis Batch {summary_id}... ({processed_rows}/{total_rows_to_process})"
-                    job.save_meta()
+    # Dictionary to store anomaly results for each transaction_id_asersi
+    transaction_anomaly_results = {}
 
-                    parsed_date = datetime.strptime(anomaly.tanggal, '%Y-%m-%d').date()
-                    parsed_time = datetime.strptime(anomaly.jam, '%H:%M:%S').time()
-                    new_result = models.AnomalyResult( # Changed to AnomalyResult
-                        execution_id=execution.execution_id, # Use execution_id
-                        transaction_id_asersi=anomaly.transaction_id_asersi,
-                        summary_id=summary_id,
-                        template_id=template.template_id,
-                        special_criteria_id_violated=criteria.special_criteria_id,
-                        anomaly_datetime=datetime.combine(parsed_date, parsed_time),
-                        anomaly_type=criteria.criteria_code,
-                        violation_value=None
-                    )
-                    db.add(new_result)
-                    total_anomalies_found += 1
-                    batch_anomalies_found += 1
-                    anomalies_per_criteria[f"spec_{criteria.special_criteria_id}"] = anomalies_per_criteria.get(f"spec_{criteria.special_criteria_id}", 0) + 1
-                    if processed_rows % 1000 == 0:
-                        db.commit()
-            elif criteria.criteria_code == 'RED_PLATE': # P1: Plat Merah Dilarang
-                query = db.query(models.CsvImportLog).filter(
-                    models.CsvImportLog.daily_summary_id == summary_id,
-                    models.CsvImportLog.warna_plat == 'MERAH'
-                ).yield_per(1000)
+    for index, transaction in df_transactions.iterrows():
+        transaction_id_asersi = transaction['transaction_id_asersi']
+        summary_id = transaction['daily_summary_id']
+        
+        is_anomalous = False
+        anomaly_flags = []
+        violation_details = {}
 
-                for anomaly in query:
-                    processed_rows += 1
-                    job.meta['progress'] = f"Menganalisis Batch {summary_id}... ({processed_rows}/{total_rows_to_process})"
-                    job.save_meta()
+        # --- Apply Transaction Anomaly Rules ---
+        for rule in transaction_rules:
+            # Example: VOLUME_EXCEED_60L_R4_BW
+            if rule.anomaly_type == "SINGLE_VOLUME_EXCEED":
+                if transaction['volume_liter'] is not None and transaction['volume_liter'] > rule.min_volume_liter:
+                    if rule.plate_color and transaction['warna_plat'] and transaction['warna_plat'].lower() in [pc.lower() for pc in rule.plate_color]:
+                        if rule.consumer_type and transaction['jumlah_roda_kendaraan'] and str(transaction['jumlah_roda_kendaraan']) == rule.consumer_type.split(' ')[1]: # e.g., "roda 4" -> "4"
+                            is_anomalous = True
+                            anomaly_flags.append(rule.anomaly_type)
+                            violation_details[rule.anomaly_type] = {
+                                "threshold": rule.min_volume_liter,
+                                "actual_volume": float(transaction['volume_liter']),
+                                "plate_color": transaction['warna_plat'],
+                                "consumer_type": transaction['jumlah_roda_kendaraan']
+                            }
+                            logger.debug(f"Anomaly detected: {rule.anomaly_type} for transaction {transaction_id_asersi}")
 
-                    parsed_date = datetime.strptime(anomaly.tanggal, '%Y-%m-%d').date()
-                    parsed_time = datetime.strptime(anomaly.jam, '%H:%M:%S').time()
-                    new_result = models.AnomalyResult(
-                        execution_id=execution.execution_id,
-                        transaction_id_asersi=anomaly.transaction_id_asersi,
-                        summary_id=summary_id,
-                        template_id=template.template_id,
-                        special_criteria_id_violated=criteria.special_criteria_id,
-                        anomaly_datetime=datetime.combine(parsed_date, parsed_time),
-                        anomaly_type=criteria.criteria_code,
-                        violation_value=anomaly.warna_plat
-                    )
-                    db.add(new_result)
-                    total_anomalies_found += 1
-                    batch_anomalies_found += 1
-                    anomalies_per_criteria[f"spec_{criteria.special_criteria_id}"] = anomalies_per_criteria.get(f"spec_{criteria.special_criteria_id}", 0) + 1
-                    if processed_rows % 1000 == 0:
-                        db.commit()
-
-        # 4. Accumulated Transaction Analysis
-        for criteria in template.accumulated_criteria:
-            # Get all transactions for the current summary_id
-            transactions = db.query(models.CsvImportLog).filter(
-                models.CsvImportLog.daily_summary_id == summary_id
-            ).order_by(models.CsvImportLog.tanggal, models.CsvImportLog.jam).all()
-
-            # Group transactions by the specified field (e.g., plat_nomor, nik)
-            grouped_transactions = {}
-            for tx in transactions:
-                group_key = getattr(tx, criteria.group_by_field)
-                if group_key: # Only process if group_key is not None
-                    if group_key not in grouped_transactions:
-                        grouped_transactions[group_key] = []
-                    grouped_transactions[group_key].append(tx)
+        # --- Apply Special Anomaly Rules ---
+        for rule in special_rules:
+            if rule.criteria_code == "MISSING_PLAT_NOMOR":
+                if not transaction['plat_nomor']:
+                    is_anomalous = True
+                    anomaly_flags.append(rule.criteria_code)
+                    violation_details[rule.criteria_code] = {"message": rule.description}
+                    logger.debug(f"Anomaly detected: {rule.criteria_code} for transaction {transaction_id_asersi}")
             
-            for group_key, tx_list in grouped_transactions.items():
-                # Iterate through transactions in the group to check for accumulation
-                for i, current_tx in enumerate(tx_list):
-                    current_tx_datetime = datetime.combine(
-                        datetime.strptime(current_tx.tanggal, '%Y-%m-%d').date(),
-                        datetime.strptime(current_tx.jam, '%H:%M:%S').time()
-                    )
-                    
-                    accumulated_volume = 0
-                    # Include current transaction's volume
-                    if current_tx.volume_liter is not None:
-                        accumulated_volume += current_tx.volume_liter
+            elif rule.criteria_code == "MISSING_NIK":
+                if not transaction['nik']:
+                    is_anomalous = True
+                    anomaly_flags.append(rule.criteria_code)
+                    violation_details[rule.criteria_code] = {"message": rule.description}
+                    logger.debug(f"Anomaly detected: {rule.criteria_code} for transaction {transaction_id_asersi}")
 
-                    # Look back within the time window
-                    for j in range(i - 1, -1, -1):
-                        prev_tx = tx_list[j]
-                        prev_tx_datetime = datetime.combine(
-                            datetime.strptime(prev_tx.tanggal, '%Y-%m-%d').date(),
-                            datetime.strptime(prev_tx.jam, '%H:%M:%S').time()
-                        )
+            elif rule.criteria_code == "DUPLICATE_TRANSACTION":
+                # This is handled during import, but we can re-check if needed
+                # For now, assume batch_original_duplicate_count is reliable
+                original_transaction = db.query(CsvImportLog).filter_by(transaction_id_asersi=transaction_id_asersi).first()
+                if original_transaction and original_transaction.batch_original_duplicate_count > 0:
+                    is_anomalous = True
+                    anomaly_flags.append(rule.criteria_code)
+                    violation_details[rule.criteria_code] = {"message": rule.description, "duplicate_count": original_transaction.batch_original_duplicate_count}
+                    logger.debug(f"Anomaly detected: {rule.criteria_code} for transaction {transaction_id_asersi}")
 
-                        if current_tx_datetime - prev_tx_datetime <= timedelta(hours=criteria.time_window_hours):
-                            if prev_tx.volume_liter is not None:
-                                accumulated_volume += prev_tx.volume_liter
-                        else:
-                            # Transactions are ordered, so we can stop looking back
-                            break
-                    
-                    # Check for anomaly
-                    if accumulated_volume > criteria.threshold_value:
-                        new_result = models.AnomalyResult(
-                            execution_id=execution.execution_id,
-                            transaction_id_asersi=current_tx.transaction_id_asersi,
-                            summary_id=summary_id,
-                            template_id=template.template_id,
-                            accumulated_criteria_id_violated=criteria.accumulated_criteria_id,
-                            anomaly_datetime=current_tx_datetime,
-                            anomaly_type=criteria.criteria_code,
-                            violation_value=str(accumulated_volume)
-                        )
-                        db.add(new_result)
-                        total_anomalies_found += 1
-                        batch_anomalies_found += 1
-                        anomalies_per_criteria[f"acc_{criteria.accumulated_criteria_id}"] = anomalies_per_criteria.get(f"acc_{criteria.accumulated_criteria_id}", 0) + 1
+            elif rule.criteria_code == "RED_PLATE_VEHICLE":
+                if transaction['warna_plat'] and transaction['warna_plat'].lower() == 'merah':
+                    is_anomalous = True
+                    anomaly_flags.append(rule.criteria_code)
+                    violation_details[rule.criteria_code] = {"message": rule.description}
+                    logger.debug(f"Anomaly detected: {rule.criteria_code} for transaction {transaction_id_asersi}")
             
-            processed_rows += len(tx_list) # Update processed_rows for progress
-            job.meta['progress'] = f"Menganalisis Batch {summary_id}... ({processed_rows}/{total_rows_to_process})"
-            job.save_meta()
-            db.commit() # Commit after each group to avoid large transactions
+            elif rule.criteria_code == "TRANSACTION_INTERVAL_TOO_CLOSE":
+                # This requires looking at previous transactions for the same plat_nomor
+                # We need to ensure 'value' is an integer (seconds)
+                try:
+                    interval_threshold_seconds = int(rule.value)
+                except (ValueError, TypeError):
+                    logger.error(f"Invalid 'value' for TRANSACTION_INTERVAL_TOO_CLOSE rule: {rule.value}. Skipping.")
+                    continue
 
-        db.commit() # Commit any remaining changes for the current batch
-        anomaly_execution_crud.update_anomaly_execution_batch_status(db, batch_record.detail_id, "COMPLETED", batch_anomalies_found)
-        total_batches_processed_count += 1
+                # Get previous transaction for the same plat_nomor
+                if index > 0 and transaction['plat_nomor'] == df_transactions.loc[index-1, 'plat_nomor']:
+                    prev_transaction_datetime = df_transactions.loc[index-1, 'transaction_datetime']
+                    current_transaction_datetime = transaction['transaction_datetime']
+                    
+                    time_diff_seconds = (current_transaction_datetime - prev_transaction_datetime).total_seconds()
 
-    end_time = time.time()
-    processing_time_ms = int((end_time - start_time) * 1000)
+                    if time_diff_seconds < interval_threshold_seconds:
+                        is_anomalous = True
+                        anomaly_flags.append(rule.criteria_code)
+                        violation_details[rule.criteria_code] = {
+                            "message": rule.description,
+                            "interval_threshold_seconds": interval_threshold_seconds,
+                            "actual_interval_seconds": time_diff_seconds,
+                            "previous_transaction_id": df_transactions.loc[index-1, 'transaction_id_asersi']
+                        }
+                        logger.debug(f"Anomaly detected: {rule.criteria_code} for transaction {transaction_id_asersi}")
 
-    anomaly_execution_crud.update_anomaly_execution_status(db, execution_id, 'COMPLETED', total_batches_processed_count)
+        # Store results for current transaction
+        if is_anomalous:
+            anomalies_found_count += 1
+            transaction_anomaly_results[transaction_id_asersi] = {
+                "summary_id": summary_id,
+                "is_anomalous": True,
+                "anomaly_flags": anomaly_flags,
+                "violation_details": violation_details,
+                "anomaly_datetime": datetime.now()
+            }
+        else:
+            # If no anomalies, ensure it's marked as not anomalous
+            transaction_anomaly_results[transaction_id_asersi] = {
+                "summary_id": summary_id,
+                "is_anomalous": False,
+                "anomaly_flags": [],
+                "violation_details": {},
+                "anomaly_datetime": datetime.now()
+            }
 
-    job.meta['progress'] = 'Selesai'
-    job.save_meta()
+    # --- Save Anomaly Results to Database ---
+    for transaction_id_asersi, result_data in transaction_anomaly_results.items():
+        existing_result = db.query(AnomalyResult).filter(
+            AnomalyResult.execution_id == execution_id,
+            AnomalyResult.transaction_id_asersi == transaction_id_asersi
+        ).first()
 
-    return {
-        "total_anomalies": total_anomalies_found,
-        "per_criteria": anomalies_per_criteria,
-        "processing_time_ms": processing_time_ms
-    }
+        if not existing_result:
+            actual_anomaly = AnomalyResult(
+                execution_id=execution_id,
+                summary_id=result_data['summary_id'],
+                transaction_id_asersi=transaction_id_asersi,
+                template_id=template_id, # Store template_id
+                is_anomalous=result_data['is_anomalous'],
+                anomaly_flags=result_data['anomaly_flags'],
+                violation_details=result_data['violation_details'],
+                anomaly_datetime=result_data['anomaly_datetime']
+            )
+            db.add(actual_anomaly)
+            logger.info(f"Stored anomaly result for transaction_id_asersi {transaction_id_asersi}")
+        else:
+            existing_result.is_anomalous = result_data['is_anomalous']
+            existing_result.anomaly_flags = result_data['anomaly_flags']
+            existing_result.violation_details = result_data['violation_details']
+            existing_result.anomaly_datetime = result_data['anomaly_datetime']
+            existing_result.template_id = template_id # Update template_id
+            logger.info(f"Updated existing anomaly result for transaction_id_asersi {transaction_id_asersi}")
+    
+    db.commit()

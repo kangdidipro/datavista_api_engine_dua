@@ -4,8 +4,8 @@ from sqlalchemy.orm import sessionmaker
 from unittest.mock import MagicMock, patch
 from datetime import datetime, time
 
-from models.base import Base
-from models import models
+from app.database import Base
+from app.models import AnomalyTemplateMaster, TransactionAnomalyCriteria, SpecialAnomalyCriteria, VideoAiParameter, AccumulatedAnomalyCriteria, AnomalyResult, AnomalyExecution, AnomalyExecutionBatch, CsvSummaryMasterDaily, CsvImportLog, TabelMor, TemplateCriteriaSpecial
 from crud import analysis_crud, anomaly_execution_crud, anomaly_crud
 
 # Setup in-memory SQLite for testing
@@ -38,7 +38,7 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
     db = db_session
 
     # 1. Create SpecialAnomalyCriteria for RED_PLATE (P1)
-    red_plate_criteria = models.SpecialAnomalyCriteria(
+    red_plate_criteria = SpecialAnomalyCriteria(
         criteria_code='RED_PLATE',
         criteria_name='Plat Merah Dilarang',
         violation_rule='warna_plat == "MERAH"',
@@ -49,7 +49,7 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
     db.refresh(red_plate_criteria)
 
     # 2. Create AnomalyTemplateMaster and link RED_PLATE criteria
-    template = models.AnomalyTemplateMaster(
+    template = AnomalyTemplateMaster(
         role_name='Test Template P1',
         description='Template for P1 Red Plate Anomaly',
         created_by='test_user'
@@ -59,7 +59,7 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
     db.refresh(template)
 
     # Link the special criteria to the template
-    template_special_link = models.TemplateCriteriaSpecial(
+    template_special_link = TemplateCriteriaSpecial(
         template_id=template.template_id,
         special_criteria_id=red_plate_criteria.special_criteria_id
     )
@@ -67,9 +67,8 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
     db.commit()
     db.refresh(template) # Refresh template to load relationships
 
-    # 3. Create CsvSummaryMasterDaily
-    summary = models.CsvSummaryMasterDaily(
-        import_datetime=datetime.now(),
+            # 3. Create CsvSummaryMasterDaily
+            summary = CsvSummaryMasterDaily(        import_datetime=datetime.now(),
         file_name='test_p1.csv',
         total_records_inserted=3,
         total_volume=100.0
@@ -80,7 +79,7 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
 
     # 4. Create CsvImportLog entries
     # Anomaly case: Red Plate
-    anomaly_log_red_plate = models.CsvImportLog(
+    anomaly_log_red_plate = CsvImportLog(
         transaction_id_asersi='TX001',
         tanggal='2025-11-09',
         jam='10:00:00',
@@ -89,7 +88,7 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
         volume_liter=10.0
     )
     # Normal case: Black Plate
-    normal_log_black_plate = models.CsvImportLog(
+    normal_log_black_plate = CsvImportLog(
         transaction_id_asersi='TX002',
         tanggal='2025-11-09',
         jam='10:05:00',
@@ -98,7 +97,7 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
         volume_liter=15.0
     )
     # Normal case: White Plate
-    normal_log_white_plate = models.CsvImportLog(
+    normal_log_white_plate = CsvImportLog(
         transaction_id_asersi='TX003',
         tanggal='2025-11-09',
         jam='10:10:00',
@@ -113,7 +112,7 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
     db.refresh(normal_log_white_plate)
 
     # 5. Create AnomalyExecution record
-    execution = models.AnomalyExecution(
+    execution = AnomalyExecution(
         execution_id='EXEC001',
         template_id=template.template_id,
         execution_timestamp=datetime.now(),
@@ -130,7 +129,7 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
     analysis_crud.run_anomaly_analysis(execution.execution_id, [summary.summary_id], db)
 
     # 7. Assertions
-    anomalies = db.query(models.AnomalyResult).all()
+    anomalies = db.query(AnomalyResult).all()
     assert len(anomalies) == 1
 
     p1_anomaly = anomalies[0]
@@ -140,11 +139,11 @@ def test_p1_red_plate_anomaly_detection(db_session, mock_rq_job):
     assert p1_anomaly.violation_value == 'MERAH'
 
     # Verify execution status
-    updated_execution = db.query(models.AnomalyExecution).filter_by(execution_id='EXEC001').first()
+    updated_execution = db.query(AnomalyExecution).filter_by(execution_id='EXEC001').first()
     assert updated_execution.status == 'COMPLETED'
     assert updated_execution.total_batches_processed == 1
 
     # Verify batch status
-    batch = db.query(models.AnomalyExecutionBatch).filter_by(execution_id='EXEC001', summary_id=summary.summary_id).first()
+    batch = db.query(AnomalyExecutionBatch).filter_by(execution_id='EXEC001', summary_id=summary.summary_id).first()
     assert batch.batch_status == 'COMPLETED'
     assert batch.anomalies_found == 1

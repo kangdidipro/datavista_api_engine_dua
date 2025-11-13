@@ -7,7 +7,7 @@ from typing import List
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from .models import AnomalyExecution, AnomalyExecutionBatch, CsvImportLog, CsvSummaryMasterDaily
+from .models.all_models import AnomalyExecution, AnomalyExecutionBatch, CsvImportLog, CsvSummaryMasterDaily
 
 logger = logging.getLogger(__name__)
 

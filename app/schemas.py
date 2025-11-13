@@ -1,3 +1,4 @@
+from __future__ import annotations # Enable Postponed Evaluation of Annotations
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -207,6 +208,33 @@ class CsvSummaryMasterDaily(CsvSummaryMasterDailyBase):
     class Config:
         orm_mode = True
 
-# Update forward refs
-AnomalyTemplateMaster.update_forward_refs()
-AnomalyExecution.update_forward_refs()
+# Anomaly Result
+class AnomalyResultBase(BaseModel):
+    execution_id: str
+    transaction_id_asersi: str
+    summary_id: int
+    template_id: Optional[int] = None
+    is_anomalous: Optional[bool] = False
+    anomaly_flags: Optional[List[str]] = []
+    violation_details: Optional[dict] = {}
+
+class AnomalyResultCreate(AnomalyResultBase):
+    pass
+
+class AnomalyResultUpdate(AnomalyResultBase):
+    is_anomalous: Optional[bool] = None
+    anomaly_flags: Optional[List[str]] = None
+    violation_details: Optional[dict] = None
+
+class AnomalyResult(AnomalyResultBase):
+    anomaly_datetime: datetime
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+# After all models are defined, rebuild the ones with forward references
+# to resolve the string-based type hints into actual types.
+AnomalyTemplateMaster.model_rebuild()
+AnomalyExecution.model_rebuild()

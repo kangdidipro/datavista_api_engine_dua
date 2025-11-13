@@ -19,13 +19,7 @@ if config.config_file_name is not None:
 import sys
 import os
 sys.path.insert(0, os.path.abspath('.')) # Add current directory to path
-from app.models import Base # Import Base from models.base
-from app.models import (
-    AnomalyTemplateMaster, TransactionAnomalyCriteria, SpecialAnomalyCriteria,
-    VideoAiParameter, TemplateCriteriaVolume, TemplateCriteriaSpecial,
-    LogManajemenFilterDtpa, HasilAnalisisDtpa, AccumulatedAnomalyCriteria,
-    TemplateCriteriaAccumulated, CsvSummaryMasterDaily, CsvImportLog, TabelMor
-) # Import all models explicitly
+from app.models import Base, AnomalyTemplateMaster, TransactionAnomalyCriteria, SpecialAnomalyCriteria, VideoAiParameter, AccumulatedAnomalyCriteria, TemplateCriteriaVolume, TemplateCriteriaSpecial, TemplateCriteriaVideo, TemplateCriteriaAccumulated, CsvSummaryMasterDaily, CsvImportLog, TabelMor, AnomalyResult, AnomalyExecution, AnomalyExecutionBatch
 
 target_metadata = Base.metadata
 

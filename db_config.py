@@ -4,10 +4,10 @@ import logging
 # --- KONFIGURASI DOCKER INTERNAL (Sesuai docker-compose.yml) ---
 
 POSTGRES_CONFIG = {
-    "host": os.getenv("POSTGRES_HOST", "datavista_postgres"),
+    "host": os.getenv("POSTGRES_HOST", "postgres_db"),
     "port": os.getenv("POSTGRES_PORT", "5432"),
-    "user": os.getenv("POSTGRES_USER", "datavista_api_user"),
-    "password": os.getenv("POSTGRES_PASSWORD", "DatavistaAPI@2025"),
+    "user": os.getenv("POSTGRES_USER", "user"),
+    "password": os.getenv("POSTGRES_PASSWORD", "password"),
     "database": os.getenv("POSTGRES_DB", "datavista_db")
 }
 logging.warning(f"[DIAGNOSTIC] POSTGRES_CONFIG: {POSTGRES_CONFIG}")

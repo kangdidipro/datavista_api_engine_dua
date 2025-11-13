@@ -1,3 +1,4 @@
+from __future__ import annotations # Enable Postponed Evaluation of Annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Dict
@@ -5,8 +6,14 @@ from rq import Queue # Import Queue
 from redis import Redis
 
 from app.database import get_db
-from app import models as app_models
-from app.schemas import AnomalyAnalysisRequest, AnomalyTemplateMaster, AnomalyTemplateMasterCreate, AnomalyExecution, AnomalyExecutionBatch, TransactionAnomalyCriteria, TransactionAnomalyCriteriaCreate, TransactionAnomalyCriteriaUpdate, SpecialAnomalyCriteria, SpecialAnomalyCriteriaCreate, SpecialAnomalyCriteriaUpdate, VideoAiParameter, AccumulatedAnomalyCriteria, CsvSummaryMasterDaily, AccumulatedAnomalyCriteriaCreate, AccumulatedAnomalyCriteriaUpdate
+from app.models import AnomalyTemplateMaster, TransactionAnomalyCriteria, SpecialAnomalyCriteria, VideoAiParameter, AccumulatedAnomalyCriteria, AnomalyResult, AnomalyExecution, AnomalyExecutionBatch, CsvSummaryMasterDaily, CsvImportLog, TabelMor
+from app.schemas import (
+    AnomalyAnalysisRequest, AnomalyTemplateMaster, AnomalyTemplateMasterCreate, AnomalyExecution, AnomalyExecutionBatch,
+    TransactionAnomalyCriteria, TransactionAnomalyCriteriaCreate, TransactionAnomalyCriteriaUpdate,
+    SpecialAnomalyCriteria, SpecialAnomalyCriteriaCreate, SpecialAnomalyCriteriaUpdate,
+    VideoAiParameter, AccumulatedAnomalyCriteria, CsvSummaryMasterDaily, AccumulatedAnomalyCriteriaCreate, AccumulatedAnomalyCriteriaUpdate,
+    AnomalyResult # Import AnomalyResult schema
+)
 from crud import anomaly_crud, analysis_crud, anomaly_execution_crud
 
 router = APIRouter(
@@ -15,7 +22,7 @@ router = APIRouter(
 )
 
 # Redis Queue Connection
-redis_conn = Redis.from_url('redis://localhost:6379')
+redis_conn = Redis.from_url('redis://redis_broker:6379')
 q = Queue(connection=redis_conn)
 
 @router.post("/analyze", status_code=202)
@@ -28,7 +35,7 @@ def start_analysis(request: AnomalyAnalysisRequest, db: Session = Depends(get_db
     elif request.transaction_criteria_ids or request.special_criteria_ids or request.accumulated_criteria_ids:
         # Create or get an ad-hoc template
         ad_hoc_template_name = "Ad-Hoc Analysis Template"
-        template_to_use = db.query(app_models.AnomalyTemplateMaster).filter_by(role_name=ad_hoc_template_name).first()
+        template_to_use = db.query(AnomalyTemplateMaster).filter_by(role_name=ad_hoc_template_name).first()
         if not template_to_use:
             template_to_use = anomaly_crud.create_template(db, AnomalyTemplateMasterCreate(
                 role_name=ad_hoc_template_name,
@@ -88,9 +95,10 @@ def start_analysis(request: AnomalyAnalysisRequest, db: Session = Depends(get_db
     # 3. Enqueue the analysis job
     # Pass execution_id and summary_ids to the worker
     job = q.enqueue(
-        analysis_crud.run_anomaly_analysis,
+        'rq_worker_entrypoint.execute_anomaly_analysis_job', # Use the wrapper function string
         execution.execution_id, # Pass execution_id
         request.summary_ids,    # Pass summary_ids
+        template_to_use.template_id, # Pass template_id
         job_timeout=3600
     )
 
@@ -115,10 +123,10 @@ def get_template_details(template_id: int, db: Session = Depends(get_db)):
     
     return {
         "template": template,
-        "available_volume": db.query(app_models.TransactionAnomalyCriteria).all(),
-        "available_special": db.query(app_models.SpecialAnomalyCriteria).all(),
-        "available_video": db.query(app_models.VideoAiParameter).all(),
-        "available_accumulated": db.query(app_models.AccumulatedAnomalyCriteria).all(),
+        "available_volume": db.query(TransactionAnomalyCriteria).all(),
+        "available_special": db.query(SpecialAnomalyCriteria).all(),
+        "available_video": db.query(VideoAiParameter).all(),
+        "available_accumulated": db.query(AccumulatedAnomalyCriteria).all(),
     }
 
 @router.post("/templates", response_model=AnomalyTemplateMaster, status_code=201)
@@ -159,22 +167,22 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
     return {"message": "Template deleted successfully."}
 
 # Endpoints for SpecialAnomalyCriteria
-@router.post("/special-criteria", response_model=app_models.SpecialAnomalyCriteria, status_code=201)
+@router.post("/special-criteria", response_model=SpecialAnomalyCriteria, status_code=201)
 def create_special_criteria(criteria: SpecialAnomalyCriteriaCreate, db: Session = Depends(get_db)):
     return anomaly_crud.create_special_criteria(db=db, criteria=criteria)
 
-@router.get("/special-criteria", response_model=List[app_models.SpecialAnomalyCriteria])
+@router.get("/special-criteria", response_model=List[SpecialAnomalyCriteria])
 def get_all_special_criteria(db: Session = Depends(get_db)):
     return anomaly_crud.get_all_special_criteria(db)
 
-@router.get("/special-criteria/{special_criteria_id}", response_model=app_models.SpecialAnomalyCriteria)
+@router.get("/special-criteria/{special_criteria_id}", response_model=SpecialAnomalyCriteria)
 def get_special_criteria(special_criteria_id: int, db: Session = Depends(get_db)):
     criteria = anomaly_crud.get_special_criteria(db, special_criteria_id)
     if not criteria:
         raise HTTPException(status_code=404, detail="Special Criteria not found")
     return criteria
 
-@router.put("/special-criteria/{special_criteria_id}", response_model=app_models.SpecialAnomalyCriteria)
+@router.put("/special-criteria/{special_criteria_id}", response_model=SpecialAnomalyCriteria)
 def update_special_criteria(special_criteria_id: int, criteria: SpecialAnomalyCriteriaUpdate, db: Session = Depends(get_db)):
     updated_criteria = anomaly_crud.update_special_criteria(db, special_criteria_id, criteria)
     if not updated_criteria:
@@ -189,22 +197,22 @@ def delete_special_criteria(special_criteria_id: int, db: Session = Depends(get_
     return {"message": "Special Criteria deleted successfully."}
 
 # Endpoints for TransactionAnomalyCriteria
-@router.post("/transaction-criteria", response_model=app_models.TransactionAnomalyCriteria, status_code=201)
+@router.post("/transaction-criteria", response_model=TransactionAnomalyCriteria, status_code=201)
 def create_transaction_criteria(criteria: TransactionAnomalyCriteriaCreate, db: Session = Depends(get_db)):
     return anomaly_crud.create_transaction_criteria(db=db, criteria=criteria)
 
-@router.get("/transaction-criteria", response_model=List[app_models.TransactionAnomalyCriteria])
+@router.get("/transaction-criteria", response_model=List[TransactionAnomalyCriteria])
 def get_all_transaction_criteria(db: Session = Depends(get_db)):
     return anomaly_crud.get_all_transaction_criteria(db)
 
-@router.get("/transaction-criteria/{criteria_id}", response_model=app_models.TransactionAnomalyCriteria)
+@router.get("/transaction-criteria/{criteria_id}", response_model=TransactionAnomalyCriteria)
 def get_transaction_criteria(criteria_id: int, db: Session = Depends(get_db)):
     criteria = anomaly_crud.get_transaction_criteria(db, criteria_id)
     if not criteria:
         raise HTTPException(status_code=404, detail="Transaction Criteria not found")
     return criteria
 
-@router.put("/transaction-criteria/{criteria_id}", response_model=app_models.TransactionAnomalyCriteria)
+@router.put("/transaction-criteria/{criteria_id}", response_model=TransactionAnomalyCriteria)
 def update_transaction_criteria(criteria_id: int, criteria: TransactionAnomalyCriteriaUpdate, db: Session = Depends(get_db)):
     updated_criteria = anomaly_crud.update_transaction_criteria(db, criteria_id, criteria)
     if not updated_criteria:
@@ -219,22 +227,22 @@ def delete_transaction_criteria(criteria_id: int, db: Session = Depends(get_db))
     return {"message": "Transaction Criteria deleted successfully."}
 
 # Endpoints for AccumulatedAnomalyCriteria
-@router.post("/accumulated-criteria", response_model=app_models.AccumulatedAnomalyCriteria, status_code=201)
+@router.post("/accumulated-criteria", response_model=AccumulatedAnomalyCriteria, status_code=201)
 def create_accumulated_criteria(criteria: AccumulatedAnomalyCriteriaCreate, db: Session = Depends(get_db)):
     return anomaly_crud.create_accumulated_criteria(db=db, criteria=criteria)
 
-@router.get("/accumulated-criteria", response_model=List[app_models.AccumulatedAnomalyCriteria])
+@router.get("/accumulated-criteria", response_model=List[AccumulatedAnomalyCriteria])
 def get_all_accumulated_criteria(db: Session = Depends(get_db)):
     return anomaly_crud.get_all_accumulated_criteria(db)
 
-@router.get("/accumulated-criteria/{accumulated_criteria_id}", response_model=app_models.AccumulatedAnomalyCriteria)
+@router.get("/accumulated-criteria/{accumulated_criteria_id}", response_model=AccumulatedAnomalyCriteria)
 def get_accumulated_criteria(accumulated_criteria_id: int, db: Session = Depends(get_db)):
     criteria = anomaly_crud.get_accumulated_criteria(db, accumulated_criteria_id)
     if not criteria:
         raise HTTPException(status_code=404, detail="Accumulated Criteria not found")
     return criteria
 
-@router.put("/accumulated-criteria/{accumulated_criteria_id}", response_model=app_models.AccumulatedAnomalyCriteria)
+@router.put("/accumulated-criteria/{accumulated_criteria_id}", response_model=AccumulatedAnomalyCriteria)
 def update_accumulated_criteria(accumulated_criteria_id: int, criteria: AccumulatedAnomalyCriteriaUpdate, db: Session = Depends(get_db)):
     updated_criteria = anomaly_crud.update_accumulated_criteria(db, accumulated_criteria_id, criteria)
     if not updated_criteria:
@@ -247,3 +255,11 @@ def delete_accumulated_criteria(accumulated_criteria_id: int, db: Session = Depe
     if not deleted:
         raise HTTPException(status_code=404, detail="Accumulated Criteria not found")
     return {"message": "Accumulated Criteria deleted successfully."}
+
+# Endpoints for AnomalyResult
+@router.get("/results/{summary_id}", response_model=List[AnomalyResult])
+def get_anomaly_results_for_summary(summary_id: int, db: Session = Depends(get_db)):
+    results = anomaly_crud.get_anomaly_results_by_summary_id(db, summary_id)
+    if not results:
+        raise HTTPException(status_code=404, detail=f"No anomaly results found for summary_id {summary_id}")
+    return results

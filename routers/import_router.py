@@ -39,11 +39,11 @@ async def import_csv_to_db(
             csv_buffer = io.BytesIO(contents)
             df = pd.read_csv(
                 csv_buffer, 
-                sep=';', 
-                decimal=',', 
-                header=None, 
-                skiprows=1, 
-                names=[
+                                sep=';',
+                                decimal=',',
+                                header=None,
+                                skiprows=1,
+                                comment='#',                names=[
                     'transaction_id_asersi', 'tanggal', 'jam', 'mor', 'provinsi', 
                     'kota_kabupaten', 'no_spbu', 'no_nozzle', 'no_dispenser', 
                     'produk', 'volume_liter', 'penjualan_rupiah', 'operator', 
@@ -183,8 +183,7 @@ async def import_csv_to_db(
             'kota_kabupaten', 'no_spbu', 'no_nozzle', 'no_dispenser', 
             'produk', 'volume_liter', 'penjualan_rupiah', 'operator', 
             'mode_transaksi', 'plat_nomor', 'nik', 'sektor_non_kendaraan', 
-            'jumlah_roda_kendaraan', 'kuota', 'warna_plat',
-            'batch_original_duplicate_count' # New column
+            'jumlah_roda_kendaraan', 'kuota', 'warna_plat'
         ]
         # Menyelaraskan DataFrame dengan urutan kolom yang benar
         df_aligned = df[cols_for_insert]
@@ -203,7 +202,7 @@ async def import_csv_to_db(
         total_mode_transaksi = df['mode_transaksi'].nunique()
         total_plat_nomor = df['plat_nomor'].nunique()
         total_nik = df['nik'].nunique()
-        total_sektor_non_kendaraan = df['sektor_non_kendaraan'].nunique()
+        total_sektor_non_kendaraan = df['sektor_non_kendaraan'].dropna().nunique() if 'sektor_non_kendaraan' in df.columns and not df['sektor_non_kendaraan'].dropna().empty else 0
 
         total_jumlah_roda_kendaraan_4 = df[df['jumlah_roda_kendaraan'] == '4']['jumlah_roda_kendaraan'].count()
         total_jumlah_roda_kendaraan_6 = df[df['jumlah_roda_kendaraan'] == '6']['jumlah_roda_kendaraan'].count()
@@ -270,7 +269,7 @@ async def import_csv_to_db(
             total_mode_transaksi=str(total_mode_transaksi),
             total_plat_nomor=str(total_plat_nomor),
             total_nik=str(total_nik),
-            total_sektor_non_kendaraan=str(total_sektor_non_kendaraan),
+            sektor_non_kendaraan=str(total_sektor_non_kendaraan),
             total_jumlah_roda_kendaraan_4=str(total_jumlah_roda_kendaraan_4),
             total_jumlah_roda_kendaraan_6=str(total_jumlah_roda_kendaraan_6),
             total_kuota=float(total_kuota),

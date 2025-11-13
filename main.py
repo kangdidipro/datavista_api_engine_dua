@@ -14,12 +14,13 @@ import redis
 # Import Router (Absolut - Sudah LULUS troubleshooting path)
 from routers.import_router import router as import_router
 from routers.video_router import router as video_router
-# from routers.anomaly_router import router as anomaly_router # Dikomentari sementara
+from routers.anomaly_router import router as anomaly_router
 from routers.export_router import router as export_router
 from routers.summary_router import router as summary_router
 
 # Import database functions
-from app.database import get_db_connection, create_initial_tables
+from app.database import init_db
+from app.models import AnomalyTemplateMaster, TransactionAnomalyCriteria, SpecialAnomalyCriteria, AccumulatedAnomalyCriteria, VideoAiParameter, AnomalyResult, AnomalyExecution, AnomalyExecutionBatch, CsvSummaryMasterDaily, CsvImportLog, TabelMor
 
 # --- 1. INISIALISASI APLIKASI (DEKLARASI 'app' - CRITICAL FIX) ---
 app = FastAPI(
@@ -30,8 +31,7 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def startup_event():
-    with get_db_connection() as conn:
-        create_initial_tables(conn)
+    pass
 
 # --- 2. KONFIGURASI CORS ---
 origins = [
@@ -98,6 +98,6 @@ async def check_database_status():
 
 app.include_router(import_router)
 app.include_router(video_router)
-# app.include_router(anomaly_router) # Dikomentari sementara
+app.include_router(anomaly_router) # Dikomentari sementara
 app.include_router(export_router)
 app.include_router(summary_router)

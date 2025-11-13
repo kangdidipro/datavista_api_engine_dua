@@ -1,0 +1,43 @@
+# Centralize model imports to ensure they are all registered with the Base
+from .all_models import (
+    Base,
+    SQLiteARRAY,
+    CsvSummaryMasterDaily,
+    AnomalyTemplateMaster,
+    TransactionAnomalyCriteria,
+    SpecialAnomalyCriteria,
+    VideoAiParameter,
+    TemplateCriteriaVolume,
+    TemplateCriteriaVolume,
+    TemplateCriteriaSpecial,
+    TemplateCriteriaVideo,
+    AccumulatedAnomalyCriteria,
+    TemplateCriteriaAccumulated,
+    AnomalyResult,
+    AnomalyExecution,
+    AnomalyExecutionBatch,
+    CsvImportLog,
+    TabelMor,
+)
+
+# Define what gets imported with a 'from app.models import *'
+__all__ = [
+    "Base",
+    "SQLiteARRAY",
+    "CsvSummaryMasterDaily",
+    "AnomalyTemplateMaster",
+    "TransactionAnomalyCriteria",
+    "SpecialAnomalyCriteria",
+    "VideoAiParameter",
+    "TemplateCriteriaVolume",
+    "TemplateCriteriaVolume",
+    "TemplateCriteriaSpecial",
+    "TemplateCriteriaVideo",
+    "AccumulatedAnomalyCriteria",
+    "TemplateCriteriaAccumulated",
+    "AnomalyResult",
+    "AnomalyExecution",
+    "AnomalyExecutionBatch",
+    "CsvImportLog",
+    "TabelMor",
+]
