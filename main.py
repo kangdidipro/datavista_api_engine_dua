@@ -35,6 +35,7 @@ async def startup_event():
 
 # --- 2. KONFIGURASI CORS ---
 origins = [
+    "http://localhost:8081",  # Frontend Laravel
     "http://localhost:8000",  # Laravel Development Host
     "http://localhost",
     "http://127.0.0.1",
